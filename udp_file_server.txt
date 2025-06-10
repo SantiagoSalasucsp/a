@@ -1,0 +1,179 @@
+// SERVIDOR - Funciones para manejo de archivos con UDP
+
+// Variables globales adicionales para el servidor:
+int udpSocket;
+std::map<std::string, struct sockaddr_in> clientesUDP; // mapear nickname a dirección UDP
+
+// Función para inicializar servidor UDP (llamar en main después de TCP)
+void inicializarUDP() {
+    udpSocket = socket(AF_INET, SOCK_DGRAM, 0);
+    if (udpSocket < 0) {
+        perror("Error creando socket UDP servidor");
+        return;
+    }
+
+    struct sockaddr_in serverAddr;
+    memset(&serverAddr, 0, sizeof(serverAddr));
+    serverAddr.sin_family = AF_INET;
+    serverAddr.sin_port = htons(45001); // Puerto UDP del servidor
+    serverAddr.sin_addr.s_addr = INADDR_ANY;
+
+    if (bind(udpSocket, (struct sockaddr*)&serverAddr, sizeof(serverAddr)) < 0) {
+        perror("Error en bind UDP servidor");
+        close(udpSocket);
+        return;
+    }
+
+    // Crear hilo para recibir archivos UDP
+    std::thread(recibirArchivosUDP).detach();
+}
+
+// Función para recibir archivos UDP
+void recibirArchivosUDP() {
+    while (true) {
+        udp_rcv receiver(udpSocket);
+        receiver.recibir();
+
+        // Guardar dirección del cliente
+        struct sockaddr_in clientAddr = receiver.from_addr;
+
+        // Procesar mensaje usando protocolo exacto
+        char buffer[256];
+        int n = receiver.leer(buffer, 5);
+        if (n <= 0) continue;
+        buffer[n] = '\0';
+        int tamano = atoi(buffer);
+
+        n = receiver.leer(buffer, 1);
+        if (n <= 0) continue;
+        buffer[n] = '\0';
+
+        if (buffer[0] == 'F') {
+            // Leer destinatario
+            n = receiver.leer(buffer, 5);
+            buffer[n] = '\0';
+            int tamanoDest = atoi(buffer);
+
+            char* dest = new char[tamanoDest + 1];
+            n = receiver.leer(dest, tamanoDest);
+            dest[n] = '\0';
+            std::string destinatario(dest);
+            delete[] dest;
+
+            // Leer tamaño nombre archivo
+            n = receiver.leer(buffer, 100);
+            buffer[100] = '\0';
+            long tamanoNombre = strtol(buffer, NULL, 10);
+
+            // Leer nombre archivo
+            char* nombreArchivo = new char[tamanoNombre + 1];
+            n = receiver.leer(nombreArchivo, tamanoNombre);
+            nombreArchivo[n] = '\0';
+
+            // Leer tamaño archivo
+            n = receiver.leer(buffer, 18);
+            buffer[18] = '\0';
+            long tamanoArchivo = atol(buffer);
+
+            // Leer contenido archivo
+            char* datosArchivo = new char[tamanoArchivo];
+            n = receiver.leer(datosArchivo, tamanoArchivo);
+
+            // Leer hash
+            char hashRecibido[6];
+            n = receiver.leer(hashRecibido, 5);
+            hashRecibido[5] = '\0';
+
+            // Encontrar nickname del remitente por IP
+            std::string remitente = "Desconocido";
+            char clientIP[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &clientAddr.sin_addr, clientIP, INET_ADDRSTRLEN);
+            
+            // Buscar en clientesUDP por IP (necesitarás implementar esto)
+            for (auto& pair : clientesUDP) {
+                char savedIP[INET_ADDRSTRLEN];
+                inet_ntop(AF_INET, &pair.second.sin_addr, savedIP, INET_ADDRSTRLEN);
+                if (strcmp(clientIP, savedIP) == 0) {
+                    remitente = pair.first;
+                    break;
+                }
+            }
+
+            // Reenviar a destinatario si existe
+            if (mapaSockets.find(destinatario) != mapaSockets.end()) {
+                // Crear mensaje exacto del protocolo
+                long tamRemitente = remitente.length();
+                long dataLen = 1 + 5 + tamRemitente + 100 + tamanoNombre + 18 + tamanoArchivo + 5;
+                char* bufferEnvio = new char[5 + dataLen];
+                
+                sprintf(bufferEnvio, "%05ld", dataLen);
+                int pos = 5;
+                bufferEnvio[pos++] = 'f';
+
+                sprintf(bufferEnvio + pos, "%05ld", tamRemitente);
+                pos += 5;
+
+                memcpy(bufferEnvio + pos, remitente.c_str(), tamRemitente);
+                pos += tamRemitente;
+
+                char campoTamNombre[101];
+                sprintf(campoTamNombre, "%0100ld", tamanoNombre);
+                memcpy(bufferEnvio + pos, campoTamNombre, 100);
+                pos += 100;
+
+                memcpy(bufferEnvio + pos, nombreArchivo, tamanoNombre);
+                pos += tamanoNombre;
+
+                char tamArchivoStr[19];
+                sprintf(tamArchivoStr, "%018ld", tamanoArchivo);
+                memcpy(bufferEnvio + pos, tamArchivoStr, 18);
+                pos += 18;
+
+                memcpy(bufferEnvio + pos, datosArchivo, tamanoArchivo);
+                pos += tamanoArchivo;
+
+                memcpy(bufferEnvio + pos, hashRecibido, 5);
+                pos += 5;
+
+                // Enviar vía UDP al destinatario
+                if (clientesUDP.find(destinatario) != clientesUDP.end()) {
+                    udp_snd sender(udpSocket, clientesUDP[destinatario]);
+                    sender.enviar(bufferEnvio, 5 + dataLen);
+                    std::cout << "Archivo reenviado vía UDP de " << remitente 
+                              << " a " << destinatario << std::endl;
+                }
+                
+                delete[] bufferEnvio;
+            }
+            
+            delete[] nombreArchivo;
+            delete[] datosArchivo;
+        }
+    }
+}
+
+// Función para registrar cliente UDP (llamar cuando se conecta un cliente)
+void registrarClienteUDP(const std::string& nickname, const std::string& ip) {
+    struct sockaddr_in clientAddr;
+    memset(&clientAddr, 0, sizeof(clientAddr));
+    clientAddr.sin_family = AF_INET;
+    clientAddr.sin_port = htons(45002); // Puerto del cliente para recibir
+    inet_pton(AF_INET, ip.c_str(), &clientAddr.sin_addr);
+    
+    clientesUDP[nickname] = clientAddr;
+}
+
+// Modificar el case 'F' en leerSocket() - COMENTAR O ELIMINAR COMPLETAMENTE:
+/*
+// MENSAJE F - COMENTADO PORQUE AHORA USA UDP
+else if (buffer[0] == 'F') {
+    // Todo este bloque se comenta porque ahora los archivos van por UDP
+    printf("Mensaje F recibido por TCP - ignorando (usar UDP)\n");
+}
+*/
+
+// En main(), después de configurar TCP, agregar:
+// inicializarUDP();
+
+// Al registrar un cliente (mensaje N), agregar:
+// registrarClienteUDP(buffer, "127.0.0.1"); // o la IP real del cliente

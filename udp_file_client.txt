@@ -1,0 +1,231 @@
+// CLIENTE - Funciones para envío de archivos con UDP
+
+// En el menú principal y en pedirYEnviarP() - reemplaza el caso 'F'/'f':
+else if (opcion == 'F' || opcion == 'f') {
+    // Mensaje F - Enviar archivo
+    std::string destino;
+    std::string rutaArchivo;
+    std::string nombreArchivo;
+
+    std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+    std::cout << "Nombre Destinatario: ";
+    std::getline(std::cin, destino);
+    std::cout << "Ruta del archivo a enviar: ";
+    std::getline(std::cin, rutaArchivo);
+
+    // nombre del archivo sin ruta
+    size_t posBarra = rutaArchivo.find_last_of("/\\");
+    if (posBarra != std::string::npos) {
+        nombreArchivo = rutaArchivo.substr(posBarra + 1);
+    } else {
+        nombreArchivo = rutaArchivo;
+    }
+
+    // abre el archivo en modo binario y se lee
+    std::ifstream archivoEntrada(rutaArchivo, std::ios::in | std::ios::binary);
+    if (!archivoEntrada.is_open()) {
+        std::cerr << "No se pudo abrir el archivo " << rutaArchivo << "\n";
+        // Si está en pedirYEnviarP, llamar recursivamente
+        // pedirYEnviarP(sock, simbolo);
+        // Si está en el menú principal, usar continue;
+        continue; // o return si está en pedirYEnviarP
+    }
+    std::vector<char> datosArchivo((std::istreambuf_iterator<char>(archivoEntrada)),
+                                 std::istreambuf_iterator<char>());
+    long tamanoArchivo = datosArchivo.size();
+    archivoEntrada.close();
+
+    // hash del archivo
+    int valorHash = calcularHash(datosArchivo.data(), tamanoArchivo);
+    char hashStr[6];
+    sprintf(hashStr, "%05d", valorHash);
+
+    // campo tamaño nombre archivo
+    long tamanoNomArchivo = nombreArchivo.size();
+    char campoTamanoNombre[101];
+    sprintf(campoTamanoNombre, "%0100ld", tamanoNomArchivo);
+
+    // tamaños
+    long tamanoDestino = destino.size();
+    long dataLen = 1 + 5 + tamanoDestino + 100 + tamanoNomArchivo + 18 + tamanoArchivo + 5;
+    long tamanoMensajeTotal = 5 + dataLen;
+    char *bufferEnvio = new char[tamanoMensajeTotal];
+    memset(bufferEnvio, 0, tamanoMensajeTotal);
+
+    // 5B dataLen
+    sprintf(bufferEnvio, "%05ld", dataLen);
+    int posEnvio = 5;
+
+    // 1B tipo F
+    bufferEnvio[posEnvio++] = 'F';
+
+    // 5B tamaño nickaname destinatario
+    {
+        char tmp[10];
+        sprintf(tmp, "%05ld", tamanoDestino);
+        memcpy(bufferEnvio + posEnvio, tmp, 5);
+        posEnvio += 5;
+    }
+
+    // nickname destinatario
+    memcpy(bufferEnvio + posEnvio, destino.c_str(), tamanoDestino);
+    posEnvio += tamanoDestino;
+
+    // 100B longitud archivo
+    memcpy(bufferEnvio + posEnvio, campoTamanoNombre, 100);
+    posEnvio += 100;
+
+    // nombre archivo
+    memcpy(bufferEnvio + posEnvio, nombreArchivo.c_str(), tamanoNomArchivo);
+    posEnvio += tamanoNomArchivo;
+
+    // 18B tamaño archivo
+    {
+        char tmp[19];
+        sprintf(tmp, "%018ld", tamanoArchivo);
+        memcpy(bufferEnvio + posEnvio, tmp, 18);
+        posEnvio += 18;
+    }
+
+    // Contenido archivo
+    memcpy(bufferEnvio + posEnvio, datosArchivo.data(), tamanoArchivo);
+    posEnvio += tamanoArchivo;
+
+    // 5B hash
+    memcpy(bufferEnvio + posEnvio, hashStr, 5);
+    posEnvio += 5;
+
+    // *** AQUÍ CAMBIO A UDP ***
+    // Crear socket UDP
+    int udpSocket = socket(AF_INET, SOCK_DGRAM, 0);
+    if (udpSocket < 0) {
+        std::cerr << "Error creando socket UDP\n";
+        delete[] bufferEnvio;
+        continue; // o return si está en pedirYEnviarP
+    }
+
+    // Configurar dirección del servidor UDP
+    struct sockaddr_in serverAddr;
+    memset(&serverAddr, 0, sizeof(serverAddr));
+    serverAddr.sin_family = AF_INET;
+    serverAddr.sin_port = htons(45001); // Puerto UDP diferente
+    inet_pton(AF_INET, "127.0.0.1", &serverAddr.sin_addr);
+
+    // Usar udp_snd para enviar
+    udp_snd sender(udpSocket, serverAddr);
+    sender.enviar(bufferEnvio, tamanoMensajeTotal);
+
+    std::cout << "Archivo enviado vía UDP.\n";
+    close(udpSocket);
+    delete[] bufferEnvio;
+    
+    // Si está en pedirYEnviarP, volver a pedir posición
+    // pedirYEnviarP(sock, simbolo);
+    // return;
+}
+
+// FUNCIÓN PARA RECIBIR ARCHIVOS VIA UDP (agregar al cliente)
+void recibirArchivosUDP() {
+    int udpSocket = socket(AF_INET, SOCK_DGRAM, 0);
+    if (udpSocket < 0) {
+        std::cerr << "Error creando socket UDP para recibir\n";
+        return;
+    }
+
+    struct sockaddr_in clientAddr;
+    memset(&clientAddr, 0, sizeof(clientAddr));
+    clientAddr.sin_family = AF_INET;
+    clientAddr.sin_port = htons(45002); // Puerto para recibir archivos
+    clientAddr.sin_addr.s_addr = INADDR_ANY;
+
+    if (bind(udpSocket, (struct sockaddr*)&clientAddr, sizeof(clientAddr)) < 0) {
+        std::cerr << "Error en bind UDP cliente\n";
+        close(udpSocket);
+        return;
+    }
+
+    while (true) {
+        udp_rcv receiver(udpSocket);
+        receiver.recibir();
+
+        // Procesar mensaje recibido usando el protocolo exacto
+        char buffer[10];
+        int n = receiver.leer(buffer, 5);
+        if (n <= 0) continue;
+        buffer[n] = '\0';
+        int tamano = atoi(buffer);
+
+        n = receiver.leer(buffer, 1);
+        if (n <= 0) continue;
+        buffer[n] = '\0';
+
+        if (buffer[0] == 'f') {
+            std::string emisorArchivo;
+            std::string nombreArchivo;
+            char hashRecibido[6];
+
+            // 5B tamaño emisor
+            n = receiver.leer(buffer, 5);
+            buffer[n] = '\0';
+            int tamanoEmisor = atoi(buffer);
+
+            // nickname emisor
+            char* emisorBuffer = new char[tamanoEmisor + 1];
+            n = receiver.leer(emisorBuffer, tamanoEmisor);
+            emisorBuffer[n] = '\0';
+            emisorArchivo = emisorBuffer;
+            delete[] emisorBuffer;
+
+            // 100B tamaño nombre del archivo
+            n = receiver.leer(buffer, 100);
+            buffer[100] = '\0';
+            long tamanoNombreArchivo = strtol(buffer, NULL, 10);
+
+            // nombre del archivo
+            char *nombreArchivoC = new char[tamanoNombreArchivo + 1];
+            n = receiver.leer(nombreArchivoC, tamanoNombreArchivo);
+            nombreArchivoC[n] = '\0';
+            nombreArchivo = std::string(nombreArchivoC, tamanoNombreArchivo);
+            delete[] nombreArchivoC;
+
+            // 18B tamaño del archivo
+            n = receiver.leer(buffer, 18);
+            buffer[18] = '\0';
+            long tamanoArchivo = atol(buffer);
+            char *contenidoArchivo = new char[tamanoArchivo + 1];
+            
+            // contenido del archivo
+            n = receiver.leer(contenidoArchivo, tamanoArchivo);
+
+            // 5B hash
+            n = receiver.leer(hashRecibido, 5);
+            hashRecibido[5] = '\0';
+
+            // calcular hash
+            int hashLocal = calcularHash(contenidoArchivo, tamanoArchivo);
+            char hashCalculado[6];
+            sprintf(hashCalculado, "%05d", hashLocal);
+
+            // compara hash
+            if (strcmp(hashCalculado, hashRecibido) == 0)
+                printf("\n[archivo UDP] %s: %s (Hash OK)\n", emisorArchivo.c_str(), nombreArchivo.c_str());
+            else
+                printf("\n[archivo UDP] %s: %s (Hash INCORRECTO: calculado %s, recibido %s)\n",
+                       emisorArchivo.c_str(), nombreArchivo.c_str(), hashCalculado, hashRecibido);
+
+            // guardar archivo
+            if (strcmp(hashCalculado, hashRecibido) == 0) {
+                std::ofstream archivoSalida(nombreArchivo, std::ios::binary);
+                if (!archivoSalida.is_open()) {
+                    std::cerr << "No se pudo crear el archivo " << nombreArchivo << " en disco.\n";
+                } else {
+                    archivoSalida.write(contenidoArchivo, tamanoArchivo);
+                    archivoSalida.close();
+                    std::cout << "Archivo " << nombreArchivo << " guardado en la carpeta actual.\n";
+                }
+            }
+            delete[] contenidoArchivo;
+        }
+    }
+    close(udpSocket);
+}
